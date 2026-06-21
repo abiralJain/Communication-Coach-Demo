@@ -26,6 +26,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([]);
   const [recap, setRecap] = useState<string | null>(null);
+  // The exact line the coach wants the user to read aloud right now.
+  const [practiceLine, setPracticeLine] = useState<string | null>(null);
 
   // Tracks the end-of-session recap: pending = waiting for it, done = text
   // captured, so we only tear down once the coach has finished speaking it.
@@ -35,6 +37,10 @@ export default function Home() {
   // Guards the one-time greeting so a re-fired data-channel open can't create
   // a second response.
   const greetedRef = useRef(false);
+  // Last timestamp the coach seeked to — lets us tell "re-explaining the same
+  // moment" (don't continue → no duplicate) from "advancing to a new moment"
+  // (continue → let the coach explain it).
+  const lastSeekRef = useRef<number | null>(null);
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -128,36 +134,49 @@ export default function Home() {
         addLine("you", evt.transcript ?? "");
         break;
 
-      // A finished response — handle seek_video tool calls + capture the recap.
+      // A finished response — handle tool calls + capture the recap.
       case "response.done": {
         const output = evt.response?.output ?? [];
+        const modelSpoke = output.some((it: any) => it.type === "message");
+        let calledTool = false;
+        let advancedToNewMoment = false;
+
         for (const item of output) {
-          if (item.type === "function_call" && item.name === "seek_video") {
-            let seconds = 0;
-            try {
-              seconds = JSON.parse(item.arguments)?.seconds ?? 0;
-            } catch {
-              /* ignore bad args */
-            }
+          if (item.type !== "function_call") continue;
+          calledTool = true;
+          let args: any = {};
+          try {
+            args = JSON.parse(item.arguments ?? "{}");
+          } catch {
+            /* ignore bad args */
+          }
+
+          if (item.name === "seek_video") {
+            const seconds = args?.seconds ?? 0;
+            if (seconds !== lastSeekRef.current) advancedToNewMoment = true;
+            lastSeekRef.current = seconds;
             seekAndPause(seconds);
-            // Tell the coach the seek succeeded, then let it keep talking.
-            sendEvent({
-              type: "conversation.item.create",
-              item: {
-                type: "function_call_output",
-                call_id: item.call_id,
-                output: JSON.stringify({ ok: true, now_at: seconds }),
-              },
-            });
-            sendEvent({ type: "response.create" });
+            sendFunctionOutput(item.call_id, { ok: true, now_at: seconds });
+          } else if (item.name === "set_practice_line") {
+            const line = (args?.line ?? "").trim();
+            if (line) setPracticeLine(line);
+            sendFunctionOutput(item.call_id, { ok: true });
+          } else {
+            sendFunctionOutput(item.call_id, { ok: false, error: "unknown tool" });
           }
         }
-        // If this was the closing recap, show it on screen and mark it done so
-        // teardown can wait until the audio finishes playing.
+
         if (recapPendingRef.current) {
+          // Closing recap: show it and mark done so teardown waits for the audio.
           const text = extractAssistantText(output);
           if (text) setRecap(text);
           recapDoneRef.current = true;
+        } else if (calledTool && (!modelSpoke || advancedToNewMoment)) {
+          // Continue exactly once: a SILENT tool call needs a follow-up so the
+          // coach can speak; OR the coach advanced to a NEW moment, so let it
+          // explain that one. If the coach already spoke about the SAME moment,
+          // we do NOT continue — that re-fire is what duplicated each moment.
+          sendEvent({ type: "response.create" });
         }
         break;
       }
@@ -179,12 +198,26 @@ export default function Home() {
     if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
   }
 
+  // Return a tool result to the coach (does NOT itself create a response).
+  function sendFunctionOutput(callId: string, result: unknown) {
+    sendEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: callId,
+        output: JSON.stringify(result),
+      },
+    });
+  }
+
   // ---- session lifecycle -----------------------------------------------------
   async function startSession() {
     setError(null);
     setRecap(null);
+    setPracticeLine(null);
     setLines([]);
     greetedRef.current = false;
+    lastSeekRef.current = null;
     setStatus("connecting");
     try {
       // 1. Mic — echo cancellation on so the coach's own voice coming back
@@ -337,6 +370,19 @@ export default function Home() {
           />
         </div>
       </section>
+
+      {/* "Say this" — the line the coach wants the user to read aloud. Most
+          prominent element when present; persists until the next line replaces it. */}
+      {practiceLine && (
+        <section className="mt-4 rounded-xl border-2 border-emerald-300 bg-emerald-50 p-5 text-center shadow-sm">
+          <div className="text-xs font-semibold uppercase tracking-widest text-emerald-600">
+            Say this out loud
+          </div>
+          <p className="mt-2 text-2xl font-semibold leading-snug text-emerald-950">
+            &ldquo;{practiceLine}&rdquo;
+          </p>
+        </section>
+      )}
 
       {/* Session focus (the ONLY thing surfaced from the report) */}
       <section className="mt-6 rounded-lg border border-stone-200 bg-white p-4">

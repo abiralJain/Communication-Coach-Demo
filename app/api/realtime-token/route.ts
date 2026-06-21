@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { report } from "@/lib/report";
-import { buildInstructions, seekVideoTool } from "@/lib/coachInstructions";
+import {
+  buildInstructions,
+  seekVideoTool,
+  setPracticeLineTool,
+} from "@/lib/coachInstructions";
 
 // Mints a short-lived ephemeral token server-side. The real OPENAI_API_KEY
 // stays here and is NEVER sent to the browser — the browser only receives the
@@ -32,15 +36,18 @@ export async function POST() {
           // twitchy so background noise / faint echo doesn't trigger a new turn.
           turn_detection: {
             type: "server_vad",
-            threshold: 0.6,
+            // 0.5 is the API default. Higher (0.6) was missing quiet user speech,
+            // so no user turn committed -> no user transcript. Echo cancellation
+            // (set in the browser getUserMedia) handles the self-hearing loop.
+            threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 700,
+            silence_duration_ms: 600,
             create_response: true,
             interrupt_response: true,
           },
         },
       },
-      tools: [seekVideoTool],
+      tools: [seekVideoTool, setPracticeLineTool],
       tool_choice: "auto",
     },
   };
